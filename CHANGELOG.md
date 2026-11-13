@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — driver-profile test preview
+- Export NPI 5X/6X .nip fragments without modifying game binaries or driver settings.
+- Warn about missing Ada helper and old Streamline, with a reversible test guide.
+- Add driver-profile regression tests to Windows CI.
+
 ## Unreleased — safety hardening
 - Remove unsafe forced-offset patching for unknown FS25 builds.
 - Require exact game VERSION, original EXE SHA-256, and full byte-layout match before every EXE write.

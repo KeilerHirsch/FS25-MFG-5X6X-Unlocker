@@ -78,6 +78,12 @@ The game build displayed in the GUI is read from the game's `VERSION` file; the 
 
 **Safety gate:** patching requires a known FS25 VERSION, a matching original executable SHA-256, and an exact match for every embedded patch signature. Unknown builds are displayed for diagnostics but cannot be patched.
 
+## FS25 1.25.1.0 driver-only test preview
+
+This build can export **NVIDIA Profile Inspector 5X/6X overrides** without changing the game executable. This is experimental and NOT a validated 5X/6X unlock on 1.25.1.0. The original EXE patch remains blocked on unknown versions.
+
+See [FS25 1.25.1.0 test guide](docs/FS25_1.25.1_DRIVER_PROFILE_TEST.md) for prerequisites, NPI MERGE import, tests, warnings and rollback.
+
 ## Backups and Restore Original
 
 Before modifying files, the unlocker creates its own backups. Restore is only enabled when a patched state or an unlocker-managed backup is detected.

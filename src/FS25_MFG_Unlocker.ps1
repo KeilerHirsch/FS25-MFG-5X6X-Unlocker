@@ -8,13 +8,14 @@ Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $AppName = "FS25 DLSS MFG 5X/6X Unlocker"
-$AppVersion = "1.0.0"
+$AppVersion = "1.1.0-driver-test"
 $TestedVersion = "1.19.0.0"
 $TestedOriginalHash = "66271CD30C35ED93571A790D15E20FEF97A3F018FCA08C3A1221C6B024C232C6"
 $TestedPatchedHash  = "D8FE54BD82B7F4EE6632CD99DAE188CFB16C1A1CD9F8D624B1B59909BFF1379B"
 $SupportedVersions = @("1.19.0.0","1.20.0.0","1.21.0.0")
 $AuthorUrl = "https://github.com/Bartek16194"
 $MfgModUrl = "https://www.nexusmods.com/site/mods/2038?tab=description"
+$NpiReleasesUrl = "https://github.com/Orbmu2k/nvidiaProfileInspector/releases"
 $SettingsDir = Join-Path $env:LOCALAPPDATA "FS25MFGUnlocker"
 $SettingsFile = Join-Path $SettingsDir "lastpath.txt"
 $GameXmlSettingsFile = Join-Path $SettingsDir "lastgamexml.txt"
@@ -593,6 +594,76 @@ function Restore-MfgBridgeIfManaged([string]$ExePath) {
     } catch { return 'restore-error' }
 }
 
+# Driver test: NVIDIA documented DRS keys; absolutely no game executable patching.
+# NPI file must be merged into an exact-name, existing game profile, never replaced.
+function Export-MfgDriverNip([string]$ProfileName, [int]$Multiplier, [string]$DestinationPath) {
+    if ($Multiplier -ne 5 -and $Multiplier -ne 6) { throw 'Only 5X and 6X are supported by the driver-profile exporter.' }
+    if ([string]::IsNullOrWhiteSpace($ProfileName) -or $ProfileName.Length -gt 256 -or
+        $ProfileName -match '[\x00-\x1f]') { throw 'Enter an existing NVIDIA profile name (1-256 characters).' }
+    if ([IO.Path]::GetExtension($DestinationPath) -ine '.nip') { throw 'Save the driver profile as a .nip file.' }
+
+    $doc = New-Object System.Xml.XmlDocument
+    [void]$doc.AppendChild($doc.CreateXmlDeclaration('1.0','utf-8',$null))
+    $root = $doc.CreateElement('ArrayOfProfile')
+    [void]$doc.AppendChild($root)
+    $profile = $doc.CreateElement('Profile')
+    [void]$root.AppendChild($profile)
+    $name = $doc.CreateElement('ProfileName')
+    $name.InnerText = $ProfileName.Trim()
+    [void]$profile.AppendChild($name)
+    # On MERGE an empty executable list leaves existing app associations unchanged.
+    [void]$profile.AppendChild($doc.CreateElement('Executeables'))
+    $settings = $doc.CreateElement('Settings')
+    [void]$profile.AppendChild($settings)
+    $values = @(
+        @{ Name='DLSS-FG - Forced Mode (Fixed)'; ID=0x10308298; Value=2 },
+        @{ Name='DLSS-MFG - Fixed Frame Generation Count'; ID=0x104D6667; Value=($Multiplier - 1) }
+    )
+    foreach ($item in $values) {
+        $setting = $doc.CreateElement('ProfileSetting')
+        foreach ($field in @(
+            @{ Tag='SettingNameInfo'; Value=$item.Name },
+            @{ Tag='SettingID'; Value=([string]$item.ID) },
+            @{ Tag='SettingValue'; Value=([string]$item.Value) },
+            @{ Tag='ValueType'; Value='Dword' }
+        )) {
+            $node = $doc.CreateElement($field.Tag)
+            $node.InnerText = $field.Value
+            [void]$setting.AppendChild($node)
+        }
+        [void]$settings.AppendChild($setting)
+    }
+    $output = [IO.Path]::GetFullPath($DestinationPath)
+    $doc.Save($output)
+    $verify = New-Object System.Xml.XmlDocument
+    $verify.Load($output)
+    if ($verify.SelectNodes('/ArrayOfProfile/Profile/Settings/ProfileSetting').Count -ne 2) {
+        throw 'NVIDIA profile export validation failed.'
+    }
+    return $output
+}
+
+function Get-MfgDriverTestReadiness([string]$ExePath) {
+    if (-not $ExePath) { return @{ Helper=$false; StreamlineVersion=$null; StreamlineModern=$false } }
+    $x64 = Split-Path -Parent $ExePath
+    $helper = Test-Path -LiteralPath (Join-Path $x64 'version.dll') -PathType Leaf
+    $slPath = Join-Path $x64 'sl.dlss_g.dll'
+    $slVer = $null
+    $modern = $false
+    if (Test-Path -LiteralPath $slPath -PathType Leaf) {
+        try {
+            $slVer = [Diagnostics.FileVersionInfo]::GetVersionInfo($slPath).FileVersion
+            $match = [regex]::Match($slVer, '^\s*(\d+)[.,](\d+)')
+            if ($match.Success) {
+                $major = [int]$match.Groups[1].Value
+                $minor = [int]$match.Groups[2].Value
+                $modern = ($major -gt 2 -or ($major -eq 2 -and $minor -ge 11))
+            }
+        } catch {}
+    }
+    return @{ Helper=$helper; StreamlineVersion=$slVer; StreamlineModern=$modern }
+}
+
 # ---------------- UI ----------------
 # ---------------- UI ----------------
 $bg = [Drawing.Color]::FromArgb(22,24,28)
@@ -607,7 +678,7 @@ $blue = [Drawing.Color]::FromArgb(85,166,255)
 
 $form = New-Object Windows.Forms.Form
 $form.Text = "$AppName v$AppVersion"
-$form.ClientSize = New-Object Drawing.Size(900, 785)
+$form.ClientSize = New-Object Drawing.Size(900, 867)
 $form.StartPosition = 'CenterScreen'
 $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox = $false
@@ -779,16 +850,50 @@ $openFolder.Font = New-Object Drawing.Font('Segoe UI Semibold', 10)
 $openFolder.FlatAppearance.BorderColor = [Drawing.Color]::FromArgb(70,75,82)
 $form.Controls.Add($openFolder)
 
+$driverLabel = New-Object Windows.Forms.Label
+$driverLabel.Text = 'FS25 1.25+ experimental: NVIDIA driver override (NO game EXE patch; use NPI Merge import)'
+$driverLabel.ForeColor = $amber
+$driverLabel.Location = New-Object Drawing.Point(34,550)
+$driverLabel.Size = New-Object Drawing.Size(831,23)
+$form.Controls.Add($driverLabel)
+
+$driver5 = New-Object Windows.Forms.Button
+$driver5.Text = 'EXPORT 5X PROFILE'
+$driver5.Location = New-Object Drawing.Point(34,579)
+$driver5.Size = New-Object Drawing.Size(252,42)
+$driver5.FlatStyle = 'Flat'
+$driver5.BackColor = $panel2
+$driver5.ForeColor = $text
+$form.Controls.Add($driver5)
+
+$driver6 = New-Object Windows.Forms.Button
+$driver6.Text = 'EXPORT 6X PROFILE'
+$driver6.Location = New-Object Drawing.Point(303,579)
+$driver6.Size = New-Object Drawing.Size(252,42)
+$driver6.FlatStyle = 'Flat'
+$driver6.BackColor = $panel2
+$driver6.ForeColor = $text
+$form.Controls.Add($driver6)
+
+$openNpi = New-Object Windows.Forms.Button
+$openNpi.Text = 'GET NVIDIA PROFILE INSPECTOR'
+$openNpi.Location = New-Object Drawing.Point(574,579)
+$openNpi.Size = New-Object Drawing.Size(291,42)
+$openNpi.FlatStyle = 'Flat'
+$openNpi.BackColor = $panel2
+$openNpi.ForeColor = $text
+$form.Controls.Add($openNpi)
+
 $logLabel = New-Object Windows.Forms.Label
 $logLabel.Text = 'Activity'
 $logLabel.Font = New-Object Drawing.Font('Segoe UI Semibold', 10)
-$logLabel.Location = New-Object Drawing.Point(31,557)
+$logLabel.Location = New-Object Drawing.Point(31,634)
 $logLabel.AutoSize = $true
 $form.Controls.Add($logLabel)
 
 $log = New-Object Windows.Forms.RichTextBox
-$log.Location = New-Object Drawing.Point(34,582)
-$log.Size = New-Object Drawing.Size(831,116)
+$log.Location = New-Object Drawing.Point(34,658)
+$log.Size = New-Object Drawing.Size(831,121)
 $log.BackColor = [Drawing.Color]::FromArgb(17,19,22)
 $log.ForeColor = $muted
 $log.BorderStyle = 'FixedSingle'
@@ -797,9 +902,9 @@ $log.Font = New-Object Drawing.Font('Consolas', 9)
 $form.Controls.Add($log)
 
 $footer = New-Object Windows.Forms.Label
-$footer.Text = 'Tested on FS25 1.19.0.0. Embedded layouts: 1.19 + 1.20 + 1.21. Unknown builds try the closest layout only after backup.'
+$footer.Text = 'EXE patch: verified legacy builds only. 1.25.1.0: driver-profile preview (5X/6X not runtime-verified). The game executable is untouched.'
 $footer.ForeColor = $muted
-$footer.Location = New-Object Drawing.Point(34,715)
+$footer.Location = New-Object Drawing.Point(34,792)
 $footer.Size = New-Object Drawing.Size(670,38)
 $form.Controls.Add($footer)
 
@@ -808,7 +913,7 @@ $github.Text = 'github.com/Bartek16194'
 $github.LinkColor = $blue
 $github.ActiveLinkColor = $accent
 $github.VisitedLinkColor = $blue
-$github.Location = New-Object Drawing.Point(704,720)
+$github.Location = New-Object Drawing.Point(704,799)
 $github.Size = New-Object Drawing.Size(161,25)
 $github.TextAlign = 'MiddleRight'
 $form.Controls.Add($github)
@@ -852,6 +957,8 @@ function Refresh-Status {
     # Important button behavior: Restore is NEVER enabled before a successful/recognized patch.
     # Enable is disabled as soon as the EXE is recognized as patched.
     $install.Enabled = $false
+    $driver5.Enabled = $false
+    $driver6.Enabled = $false
     $restore.Enabled = $false
     $openFolder.Enabled = $false
     $openMfgPage.Visible = $false
@@ -867,6 +974,8 @@ function Refresh-Status {
     }
 
     $openFolder.Enabled = $true
+    $driver5.Enabled = $true
+    $driver6.Enabled = $true
     try {
         $script:CurrentHash = Get-SHA256 $script:CurrentExe
         $versionInfo = Get-GameVersionInfo $script:CurrentExe
@@ -876,7 +985,7 @@ function Refresh-Status {
             } elseif ($SupportedVersions -contains $versionInfo.Version) {
                 Set-Value $buildValue ("{0} — SUPPORTED LAYOUT" -f $versionInfo.Version) $accent
             } else {
-                Set-Value $buildValue ("{0} — untested, closest-layout scan enabled" -f $versionInfo.Version) $amber
+                Set-Value $buildValue ("{0} — EXE patch unsupported; driver override test below" -f $versionInfo.Version) $amber
             }
         } else {
             Set-Value $buildValue 'VERSION file not found/readable — compatibility scan still available' $amber
@@ -1052,6 +1161,80 @@ $pathBox.Add_KeyDown({ if ($_.KeyCode -eq [Windows.Forms.Keys]::Enter) { Save-La
 $xmlBox.Add_Leave({ Save-LastPaths; Refresh-Status })
 $xmlBox.Add_KeyDown({ if ($_.KeyCode -eq [Windows.Forms.Keys]::Enter) { Save-LastPaths; Refresh-Status } })
 $github.Add_LinkClicked({ Start-Process $AuthorUrl })
+
+$openNpi.Add_Click({ Start-Process $NpiReleasesUrl })
+
+function Export-DriverModeFromUi([int]$Multiplier) {
+    Refresh-Status
+    if (-not $script:CurrentExe) { return }
+    $family = Get-GpuFamily $script:CurrentGpu
+    if ($family -ne 'rtx40' -and $family -ne 'rtx50') {
+        [Windows.Forms.MessageBox]::Show('This test path requires a RTX 40/50-series GPU.',$AppName) | Out-Null
+        return
+    }
+    $check = Get-MfgDriverTestReadiness $script:CurrentExe
+    $warnings = New-Object System.Collections.Generic.List[string]
+    if (-not $check.Helper -and $family -eq 'rtx40') {
+        [void]$warnings.Add('Missing x64/version.dll: NativeMFGdll Vortex Enabled is NOT proof of deployment.')
+    }
+    if (-not $check.StreamlineModern) {
+        [void]$warnings.Add(("Old Streamline ({0}): 5X/6X may not be supported at runtime." -f $check.StreamlineVersion))
+    }
+    $nl = [Environment]::NewLine
+    $lines = @(
+        "This creates a NVIDIA Profile Inspector import file ONLY."
+        "It does not change the EXE, game.xml, driver settings or DLLs."
+        ""
+        "Import into the EXACT EXISTING Farming Simulator 25 driver profile using MERGE (NEVER REPLACE)."
+        "Back up that profile in NPI before importing."
+        "In the FS25 graphics settings, enable DLSS Frame Generation (2X is fine)."
+        "The in-game menu may still show only 2X/3X/4X while the driver requests $($Multiplier)X."
+        ""
+    )
+    foreach ($w in $warnings) { $lines += $w }
+    $lines += "The driver/Streamline/helper may reject the override; only an in-game FPS check confirms it."
+    $answer = [Windows.Forms.MessageBox]::Show(($lines -join $nl),$AppName,[Windows.Forms.MessageBoxButtons]::OKCancel,[Windows.Forms.MessageBoxIcon]::Warning)
+    if ($answer -ne [Windows.Forms.DialogResult]::OK) { return }
+    try { Add-Type -AssemblyName Microsoft.VisualBasic } catch {
+        Log-Line ('Cannot load profile-name input dialog: ' + $_.Exception.Message) $red
+        return
+    }
+    $profileName = [Microsoft.VisualBasic.Interaction]::InputBox(
+        'Exact EXISTING profile name as displayed in NVIDIA Profile Inspector:',
+        'NVIDIA profile to merge into',
+        'Farming Simulator 25'
+    )
+    if ([string]::IsNullOrWhiteSpace($profileName)) { return }
+    $save = New-Object Windows.Forms.SaveFileDialog
+    $save.Filter = 'NVIDIA Profile Inspector (*.nip)|*.nip'
+    $save.FileName = "FS25_MFG_$($Multiplier)X_driver_only.nip"
+    $save.DefaultExt = 'nip'
+    $save.AddExtension = $true
+    if ($save.ShowDialog() -ne [Windows.Forms.DialogResult]::OK) { return }
+    try {
+        $path = Export-MfgDriverNip $profileName $Multiplier $save.FileName
+        Log-Line ("Saved driver profile {0}X for {1}: {2}" -f $Multiplier,$profileName,$path) $accent
+        $steps = @(
+            "Saved: $path"
+            ""
+            "1. Run NVIDIA Profile Inspector as Administrator."
+            "2. Verify FS25 is in the existing profile: $profileName"
+            "3. Export/backup the original profile."
+            "4. Import this NIP file using MERGE. Never choose REPLACE."
+            "5. Restart FS25; enable in-game DLSS FG and verify rendered vs generated FPS."
+            "6. Restore the exported original profile to undo."
+            ""
+            "No game or driver files were modified by this export."
+        )
+        [Windows.Forms.MessageBox]::Show(($steps -join $nl),$AppName,[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+    } catch {
+        Log-Line ("Driver profile export error: " + $_.Exception.Message) $red
+        [Windows.Forms.MessageBox]::Show($_.Exception.Message,$AppName,[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+    }
+}
+
+$driver5.Add_Click({ Export-DriverModeFromUi 5 })
+$driver6.Add_Click({ Export-DriverModeFromUi 6 })
 
 $install.Add_Click({
     Refresh-Status

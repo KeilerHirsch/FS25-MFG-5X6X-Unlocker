@@ -18,6 +18,10 @@ jobs:
         shell: powershell
         run: .\\tests\\patch-safety.Tests.ps1
 
+      - name: Validate driver-only 5X/6X profile exports
+        shell: powershell
+        run: .\tests\driver-profile.Tests.ps1
+
       - name: Generate embedded PowerShell header
         shell: pwsh
         run: python build/generate_embedded_header.py
